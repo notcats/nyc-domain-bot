@@ -1,22 +1,23 @@
 import 'dotenv/config';
+import fs from 'fs';
 import { Telegraf } from 'telegraf';
-import { initDb, isDomainSeen, saveDomain, updateDomainStatus, getApprovedDomains, getStats, getDomainInfo } from './db.js';
+import {
+  initDb, isDomainSeen, saveDomain, updateDomainStatus,
+  getApprovedDomainsPage, getAllApprovedDomains,
+  getStats, getDomainInfo, getDomainById,
+  upsertUser, getUsers,
+} from './db.js';
 import { filterDomain, detectNiche } from './filter.js';
+import { getFilterConfig, updateFilterConfig, SETTING_KEYS } from './config.js';
 import { checkWayback, getSnapshotCount } from './wayback.js';
 import { scrapeExpiredDomains } from './scraper.js';
 import { scrapeGoDaddy, getGoDaddyBuyLink, getGoDaddyAuctionLink } from './godaddy.js';
 import { startScheduler, stopScheduler, isSchedulerRunning } from './scheduler.js';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 if (!BOT_TOKEN) {
   console.error('[bot] TELEGRAM_BOT_TOKEN не задан!');
-  process.exit(1);
-}
-
-if (!CHAT_ID) {
-  console.error('[bot] TELEGRAM_CHAT_ID не задан!');
   process.exit(1);
 }
 
@@ -24,6 +25,30 @@ const bot = new Telegraf(BOT_TOKEN);
 
 // Инициализация БД
 initDb();
+
+// Если задан CHAT_ID в env — автоматически зарегистрировать его как пользователя
+if (process.env.TELEGRAM_CHAT_ID) {
+  upsertUser(process.env.TELEGRAM_CHAT_ID, 'env');
+  console.log(`[bot] Зарегистрирован пользователь из env: ${process.env.TELEGRAM_CHAT_ID}`);
+}
+
+// ─── Уведомления ─────────────────────────────────────────────────────────────
+
+/**
+ * Отправляет сообщение всем зарегистрированным пользователям.
+ * @param {string} text
+ * @param {object} [extra]
+ */
+async function broadcast(text, extra = {}) {
+  const users = getUsers();
+  for (const chatId of users) {
+    try {
+      await bot.telegram.sendMessage(chatId, text, extra);
+    } catch (err) {
+      console.error(`[bot] Ошибка отправки пользователю ${chatId}:`, err.message);
+    }
+  }
+}
 
 // ─── Форматирование сообщений ────────────────────────────────────────────────
 
@@ -44,18 +69,34 @@ function formatDomainMessage(domain) {
     `📌 История: ${domain.history || 'Нет данных'}`;
 }
 
-function getDomainKeyboard(domain) {
+/**
+ * Inline-keyboard using the DB row id so callback_data stays well under 64 bytes.
+ * @param {number} domainId
+ */
+function getDomainKeyboard(domainId) {
   return {
     inline_keyboard: [
       [
-        { text: '✅ КУПИТЬ', callback_data: `approve_${domain}` },
-        { text: '❌ ПРОПУСТИТЬ', callback_data: `reject_${domain}` },
+        { text: '✅ КУПИТЬ', callback_data: `approve_${domainId}` },
+        { text: '❌ ПРОПУСТИТЬ', callback_data: `reject_${domainId}` },
       ],
       [
-        { text: '🔍 ПОДРОБНЕЕ', callback_data: `details_${domain}` },
+        { text: '🔍 ПОДРОБНЕЕ', callback_data: `details_${domainId}` },
       ],
     ],
   };
+}
+
+/**
+ * Inline-keyboard for /found pagination.
+ * @param {number} page - current page (1-based)
+ * @param {number} totalPages
+ */
+function getFoundKeyboard(page, totalPages) {
+  const buttons = [];
+  if (page > 1) buttons.push({ text: '⬅️ Назад', callback_data: `found_page_${page - 1}` });
+  if (page < totalPages) buttons.push({ text: 'Вперёд ➡️', callback_data: `found_page_${page + 1}` });
+  return buttons.length ? { inline_keyboard: [buttons] } : undefined;
 }
 
 // ─── Основная логика проверки доменов ────────────────────────────────────────
@@ -72,6 +113,7 @@ export async function checkDomains() {
     console.log(`[bot] expireddomains.net: ${expiredDomains.length} доменов`);
   } catch (err) {
     console.error('[bot] Ошибка парсинга expireddomains.net:', err.message);
+    await broadcast(`⚠️ Ошибка парсинга expireddomains.net:\n${err.message}`).catch(() => {});
   }
 
   // Парсинг GoDaddy Auctions
@@ -81,6 +123,7 @@ export async function checkDomains() {
     console.log(`[bot] GoDaddy: ${godaddyDomains.length} доменов`);
   } catch (err) {
     console.error('[bot] Ошибка парсинга GoDaddy:', err.message);
+    await broadcast(`⚠️ Ошибка парсинга GoDaddy:\n${err.message}`).catch(() => {});
   }
 
   // Убираем дубликаты
@@ -113,18 +156,26 @@ export async function checkDomains() {
         continue;
       }
 
-      // Сохраняем домен
-      saveDomain({ ...domainData, status: 'pending' });
+      // Сохраняем домен и получаем его id
+      const domainId = saveDomain({ ...domainData, status: 'pending' });
+      if (!domainId) continue;
 
-      // Отправляем в Telegram
+      // Отправляем в Telegram всем пользователям
       const message = formatDomainMessage(domainData);
-      await bot.telegram.sendMessage(CHAT_ID, message, {
-        parse_mode: 'Markdown',
-        reply_markup: getDomainKeyboard(domainData.domain),
-      });
+      const users = getUsers();
+      for (const chatId of users) {
+        try {
+          await bot.telegram.sendMessage(chatId, message, {
+            parse_mode: 'Markdown',
+            reply_markup: getDomainKeyboard(domainId),
+          });
+        } catch (err) {
+          console.error(`[bot] Ошибка отправки домена ${domainData.domain} пользователю ${chatId}:`, err.message);
+        }
+      }
 
       sent++;
-      console.log(`[bot] Отправлен домен: ${domainData.domain} ✅`);
+      console.log(`[bot] Отправлен домен: ${domainData.domain} (id=${domainId}) ✅`);
 
       // Задержка между отправками
       await new Promise(r => setTimeout(r, 1000));
@@ -139,9 +190,15 @@ export async function checkDomains() {
 
 // ─── Callback обработчики ─────────────────────────────────────────────────────
 
-bot.action(/^approve_(.+)$/, async (ctx) => {
-  const domain = ctx.match[1];
+bot.action(/^approve_(\d+)$/, async (ctx) => {
+  const domainId = parseInt(ctx.match[1]);
   try {
+    const domainInfo = getDomainById(domainId);
+    if (!domainInfo) {
+      await ctx.answerCbQuery('Домен не найден');
+      return;
+    }
+    const { domain } = domainInfo;
     updateDomainStatus(domain, 'approved');
     const buyLink = getGoDaddyBuyLink(domain);
     const auctionLink = getGoDaddyAuctionLink(domain);
@@ -156,28 +213,38 @@ bot.action(/^approve_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery('✅ Домен одобрен!');
     console.log(`[bot] Домен одобрен: ${domain}`);
   } catch (err) {
-    console.error(`[bot] Ошибка approve для ${domain}:`, err.message);
+    console.error(`[bot] Ошибка approve для id ${domainId}:`, err.message);
     await ctx.answerCbQuery('Ошибка!');
   }
 });
 
-bot.action(/^reject_(.+)$/, async (ctx) => {
-  const domain = ctx.match[1];
+bot.action(/^reject_(\d+)$/, async (ctx) => {
+  const domainId = parseInt(ctx.match[1]);
   try {
-    updateDomainStatus(domain, 'rejected');
+    const domainInfo = getDomainById(domainId);
+    if (!domainInfo) {
+      await ctx.answerCbQuery('Домен не найден');
+      return;
+    }
+    updateDomainStatus(domainInfo.domain, 'rejected');
     await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
     await ctx.answerCbQuery('❌ Домен пропущен');
-    console.log(`[bot] Домен отклонён: ${domain}`);
+    console.log(`[bot] Домен отклонён: ${domainInfo.domain}`);
   } catch (err) {
-    console.error(`[bot] Ошибка reject для ${domain}:`, err.message);
+    console.error(`[bot] Ошибка reject для id ${domainId}:`, err.message);
     await ctx.answerCbQuery('Ошибка!');
   }
 });
 
-bot.action(/^details_(.+)$/, async (ctx) => {
-  const domain = ctx.match[1];
+bot.action(/^details_(\d+)$/, async (ctx) => {
+  const domainId = parseInt(ctx.match[1]);
   try {
-    const domainInfo = getDomainInfo(domain);
+    const domainInfo = getDomainById(domainId);
+    if (!domainInfo) {
+      await ctx.answerCbQuery('Домен не найден');
+      return;
+    }
+    const { domain } = domainInfo;
     const waybackUrl = `https://web.archive.org/web/*/${domain}`;
     const ahrefsUrl = `https://ahrefs.com/site-explorer/overview/v2/subdomains/live?target=${domain}`;
     const expiredUrl = `https://www.expireddomains.net/domain-name-search/?q=${domain}`;
@@ -198,7 +265,30 @@ bot.action(/^details_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery('🔍 Подробная информация');
     console.log(`[bot] Запрос подробностей: ${domain}`);
   } catch (err) {
-    console.error(`[bot] Ошибка details для ${domain}:`, err.message);
+    console.error(`[bot] Ошибка details для id ${domainId}:`, err.message);
+    await ctx.answerCbQuery('Ошибка!');
+  }
+});
+
+bot.action(/^found_page_(\d+)$/, async (ctx) => {
+  const page = parseInt(ctx.match[1]);
+  try {
+    const { rows, total, totalPages } = getApprovedDomainsPage(page);
+    if (!rows.length) {
+      await ctx.answerCbQuery('Нет данных');
+      return;
+    }
+    const lines = rows.map((d, i) =>
+      `${(page - 1) * 10 + i + 1}. \`${d.domain}\` — ${d.niche || 'NYC'} (BL: ${d.bl || 0}, Год: ${d.aby || 'N/A'})`
+    );
+    const keyboard = getFoundKeyboard(page, totalPages);
+    await ctx.editMessageText(
+      `✅ *Одобренные домены (${total}):*\n\n` + lines.join('\n'),
+      { parse_mode: 'Markdown', reply_markup: keyboard }
+    );
+    await ctx.answerCbQuery();
+  } catch (err) {
+    console.error('[bot] Ошибка found_page:', err.message);
     await ctx.answerCbQuery('Ошибка!');
   }
 });
@@ -207,6 +297,9 @@ bot.action(/^details_(.+)$/, async (ctx) => {
 
 bot.command('start', async (ctx) => {
   console.log('[bot] Команда /start');
+  // Register this user
+  upsertUser(ctx.chat.id, ctx.from?.username || '');
+
   if (!isSchedulerRunning()) {
     startScheduler(checkDomains);
     await ctx.reply(
@@ -239,11 +332,13 @@ bot.command('status', async (ctx) => {
     const stats = getStats();
     const schedulerStatus = isSchedulerRunning() ? '✅ Работает' : '⏹️ Остановлен';
     const interval = process.env.CHECK_INTERVAL || 30;
+    const users = getUsers();
 
     await ctx.reply(
-      '📊 *Статистика NYC Domain Bot*\n\n' +
+      '�� *Статистика NYC Domain Bot*\n\n' +
       `🔄 Мониторинг: ${schedulerStatus}\n` +
-      `⏰ Интервал: каждые ${interval} мин\n\n` +
+      `⏰ Интервал: каждые ${interval} мин\n` +
+      `👥 Пользователей: ${users.length}\n\n` +
       `📦 Всего найдено: ${stats.total}\n` +
       `✅ Одобрено: ${stats.approved}\n` +
       `❌ Отклонено: ${stats.rejected}\n` +
@@ -259,23 +354,53 @@ bot.command('status', async (ctx) => {
 bot.command('found', async (ctx) => {
   console.log('[bot] Команда /found');
   try {
-    const approved = getApprovedDomains();
-    if (approved.length === 0) {
+    const { rows, total, totalPages } = getApprovedDomainsPage(1);
+    if (rows.length === 0) {
       await ctx.reply('📭 Одобренных доменов пока нет.');
       return;
     }
 
-    const lines = approved.map((d, i) =>
+    const lines = rows.map((d, i) =>
       `${i + 1}. \`${d.domain}\` — ${d.niche || 'NYC'} (BL: ${d.bl || 0}, Год: ${d.aby || 'N/A'})`
     );
 
+    const keyboard = getFoundKeyboard(1, totalPages);
     await ctx.reply(
-      `✅ *Одобренные домены (${approved.length}):*\n\n` + lines.join('\n'),
-      { parse_mode: 'Markdown' }
+      `✅ *Одобренные домены (${total}):*\n\n` + lines.join('\n'),
+      { parse_mode: 'Markdown', reply_markup: keyboard }
     );
   } catch (err) {
     console.error('[bot] Ошибка /found:', err.message);
     await ctx.reply('Ошибка получения списка доменов');
+  }
+});
+
+bot.command('export', async (ctx) => {
+  console.log('[bot] Команда /export');
+  try {
+    const approved = getAllApprovedDomains();
+    if (approved.length === 0) {
+      await ctx.reply('📭 Нет одобренных доменов для экспорта.');
+      return;
+    }
+
+    const header = 'domain,bl,aby,acr,niche,source,wayback_clean,found_at,decided_at\n';
+    const rows = approved.map(d =>
+      `${d.domain},${d.bl ?? ''},${d.aby ?? ''},${d.acr ?? ''},"${d.niche ?? ''}",${d.source ?? ''},${d.wayback_clean ?? 0},${d.found_at ?? ''},${d.decided_at ?? ''}`
+    ).join('\n');
+
+    const tmpPath = '/tmp/approved_domains.csv';
+    fs.writeFileSync(tmpPath, header + rows, 'utf8');
+
+    await ctx.replyWithDocument(
+      { source: tmpPath, filename: 'approved_domains.csv' },
+      { caption: `📊 Экспорт: ${approved.length} одобренных доменов` }
+    );
+    fs.unlinkSync(tmpPath);
+    console.log(`[bot] Экспорт: ${approved.length} доменов`);
+  } catch (err) {
+    console.error('[bot] Ошибка /export:', err.message);
+    await ctx.reply(`❌ Ошибка экспорта: ${err.message}`);
   }
 });
 
@@ -327,21 +452,67 @@ bot.command('check', async (ctx) => {
 
 bot.command('settings', async (ctx) => {
   console.log('[bot] Команда /settings');
+  const cfg = getFilterConfig();
   await ctx.reply(
     '⚙️ *Текущие настройки фильтров:*\n\n' +
     '🌍 TLD: только `.com`\n' +
-    '🔗 Минимум бэклинков: `15`\n' +
-    '📅 Максимальный год: `2018`\n' +
-    '📦 Минимум архивов Wayback: `10`\n\n' +
+    `🔗 Минимум бэклинков: \`${cfg.MIN_BACKLINKS}\`\n` +
+    `📅 Максимальный год: \`${cfg.MAX_REGISTRATION_YEAR}\`\n` +
+    `📦 Минимум архивов Wayback: \`${cfg.MIN_WAYBACK_SNAPSHOTS}\`\n\n` +
     '🔑 *Ключевые слова:*\n' +
     '`nyc`, `newyork`, `new-york`, `manhattan`, `brooklyn`\n\n' +
     '🚫 *Запрещённые слова:*\n' +
     '`parking`, `casino`, `pharma`, `adult`, `spam`\n\n' +
     '📡 *Источники:*\n' +
     '• expireddomains.net\n' +
-    '• GoDaddy Auctions',
+    '• GoDaddy Auctions\n\n' +
+    '✏️ *Изменить настройку:*\n' +
+    '`/setfilter minbl 20`\n' +
+    '`/setfilter maxyear 2015`\n' +
+    '`/setfilter minacr 15`',
     { parse_mode: 'Markdown' }
   );
+});
+
+bot.command('setfilter', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  if (args.length < 2) {
+    await ctx.reply(
+      '❌ Использование:\n' +
+      '`/setfilter minbl <число>` — минимум бэклинков\n' +
+      '`/setfilter maxyear <год>` — максимальный год регистрации\n' +
+      '`/setfilter minacr <число>` — минимум архивов Wayback',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  const [param, rawValue] = args;
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) {
+    await ctx.reply('❌ Значение должно быть числом.');
+    return;
+  }
+
+  const keyMap = {
+    minbl: SETTING_KEYS.MIN_BACKLINKS,
+    maxyear: SETTING_KEYS.MAX_REGISTRATION_YEAR,
+    minacr: SETTING_KEYS.MIN_WAYBACK_SNAPSHOTS,
+  };
+
+  const key = keyMap[param.toLowerCase()];
+  if (!key) {
+    await ctx.reply('❌ Неизвестный параметр. Используйте: `minbl`, `maxyear`, `minacr`', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const ok = updateFilterConfig(key, value);
+  if (ok) {
+    console.log(`[bot] Настройка ${key} изменена на ${value}`);
+    await ctx.reply(`✅ Настройка \`${param}\` изменена на \`${value}\``, { parse_mode: 'Markdown' });
+  } else {
+    await ctx.reply('❌ Не удалось сохранить настройку.');
+  }
 });
 
 // ─── Запуск бота ───────────────────────────────────────────────────────────────

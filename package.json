@@ -5,7 +5,8 @@
   "description": "Telegram бот для мониторинга истекающих доменов с NYC-тематикой",
   "main": "src/bot.js",
   "scripts": {
-    "start": "node src/bot.js"
+    "start": "node src/bot.js",
+    "test": "node --experimental-test-module-mocks --test tests/*.test.js"
   },
   "engines": {
     "node": ">=20.0.0"

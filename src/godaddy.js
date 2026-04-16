@@ -18,6 +18,26 @@ const DEFAULT_HEADERS = {
 };
 
 /**
+ * axios GET with automatic retries and exponential backoff.
+ * @param {string} url
+ * @param {object} options - axios options
+ * @param {number} retries - max attempts
+ * @returns {Promise<import('axios').AxiosResponse>}
+ */
+async function axiosWithRetry(url, options = {}, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await axios.get(url, options);
+    } catch (err) {
+      if (attempt === retries) throw err;
+      const delay = DELAY_MS * attempt;
+      console.warn(`[godaddy] Повтор ${attempt}/${retries - 1} через ${delay}ms: ${err.message}`);
+      await sleep(delay);
+    }
+  }
+}
+
+/**
  * Парсит цену из текста
  * @param {string} text
  * @returns {string}
@@ -51,7 +71,7 @@ async function scrapeGoDaddyPage(keyword, page = 1) {
     const url = `${GODADDY_AUCTIONS_URL}?${params.toString()}`;
     console.log(`[godaddy] Запрос: ${keyword}, страница ${page}`);
 
-    const response = await axios.get(url, {
+    const response = await axiosWithRetry(url, {
       headers: DEFAULT_HEADERS,
       timeout: 15000,
     });

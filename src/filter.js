@@ -1,11 +1,8 @@
 // Фильтрация доменов по критериям NYC-тематики
+import { getFilterConfig } from './config.js';
 
 const NYC_KEYWORDS = ['nyc', 'newyork', 'new-york', 'manhattan', 'brooklyn'];
 const BANNED_KEYWORDS = ['parking', 'casino', 'pharma', 'adult', 'spam', 'porn', 'sex', 'drug'];
-
-const MIN_BACKLINKS = 15;
-const MAX_REGISTRATION_YEAR = 2018;
-const MIN_WAYBACK_SNAPSHOTS = 10;
 
 /**
  * Проверяет домен по всем критериям фильтрации.
@@ -18,6 +15,8 @@ const MIN_WAYBACK_SNAPSHOTS = 10;
  * @returns {{ pass: boolean, reason: string }}
  */
 export function filterDomain(domain) {
+  const cfg = getFilterConfig();
+  const { MIN_BACKLINKS, MAX_REGISTRATION_YEAR, MIN_WAYBACK_SNAPSHOTS } = cfg;
   const name = (domain.domain || '').toLowerCase();
 
   // TLD: только .com

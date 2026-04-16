@@ -23,6 +23,26 @@ function sleep(ms) {
 }
 
 /**
+ * axios GET with automatic retries and exponential backoff.
+ * @param {string} url
+ * @param {object} options - axios options
+ * @param {number} retries - max attempts
+ * @returns {Promise<import('axios').AxiosResponse>}
+ */
+async function axiosWithRetry(url, options = {}, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await axios.get(url, options);
+    } catch (err) {
+      if (attempt === retries) throw err;
+      const delay = REQUEST_DELAY_MS * attempt;
+      console.warn(`[wayback] Повтор ${attempt}/${retries - 1} через ${delay}ms: ${err.message}`);
+      await sleep(delay);
+    }
+  }
+}
+
+/**
  * Получает количество снимков в Wayback Machine для домена
  * @param {string} domain
  * @returns {Promise<number>}
@@ -32,7 +52,7 @@ export async function getSnapshotCount(domain) {
     await sleep(REQUEST_DELAY_MS);
     const url = `${WAYBACK_CDX_API}?url=${encodeURIComponent(domain)}&output=json&limit=1000&fl=timestamp&collapse=timestamp:6`;
     console.log(`[wayback] Получение снимков для ${domain}`);
-    const response = await axios.get(url, { timeout: 15000 });
+    const response = await axiosWithRetry(url, { timeout: 15000 });
     const data = response.data;
 
     if (!Array.isArray(data) || data.length <= 1) {
@@ -54,7 +74,10 @@ export async function getSnapshotCount(domain) {
 async function getLatestSnapshot(domain) {
   try {
     await sleep(REQUEST_DELAY_MS);
-    const response = await axios.get(`${WAYBACK_AVAILABLE_API}?url=${encodeURIComponent(domain)}`, { timeout: 10000 });
+    const response = await axiosWithRetry(
+      `${WAYBACK_AVAILABLE_API}?url=${encodeURIComponent(domain)}`,
+      { timeout: 10000 }
+    );
     const data = response.data;
 
     if (data?.archived_snapshots?.closest?.url) {
@@ -75,7 +98,7 @@ async function getLatestSnapshot(domain) {
 async function fetchSnapshotContent(snapshotUrl) {
   try {
     await sleep(REQUEST_DELAY_MS);
-    const response = await axios.get(snapshotUrl, {
+    const response = await axiosWithRetry(snapshotUrl, {
       timeout: 15000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; DomainChecker/1.0)',
@@ -83,7 +106,7 @@ async function fetchSnapshotContent(snapshotUrl) {
     });
     return (response.data || '').toLowerCase();
   } catch (err) {
-    console.error(`[wayback] Ошибка получения содержимого снимка:`, err.message);
+    console.error('[wayback] Ошибка получения содержимого снимка:', err.message);
     return '';
   }
 }
@@ -97,7 +120,7 @@ export async function getDomainHistory(domain) {
   try {
     await sleep(REQUEST_DELAY_MS);
     const url = `${WAYBACK_CDX_API}?url=${encodeURIComponent(domain)}&output=json&fl=timestamp,statuscode&limit=1000&collapse=timestamp:6`;
-    const response = await axios.get(url, { timeout: 15000 });
+    const response = await axiosWithRetry(url, { timeout: 15000 });
     const data = response.data;
 
     if (!Array.isArray(data) || data.length <= 1) {
