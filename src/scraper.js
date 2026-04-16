@@ -13,7 +13,7 @@ const NYC_KEYWORDS = ['nyc', 'newyork', 'manhattan', 'brooklyn', 'queens', 'bron
 
 function parseRows($) {
   const rows = [];
-  $('table.base1 tbody tr, #listing tbody tr, .domainlist tbody tr').each((_, row) => {
+  $('table.base1 tbody tr, #listing tbody tr, .domainlist tbody tr, table tbody tr').each((_, row) => {
     const cells = $(row).find('td');
     if (cells.length < 5) return;
     const domain = $(cells[0]).find('a').first().text().trim().toLowerCase();
@@ -56,18 +56,50 @@ export async function scrapeExpiredDomains() {
 
 export async function debugScrape() {
   const lines = [];
-  for (const kw of NYC_KEYWORDS) {
-    try {
-      const url = `https://www.expireddomains.net/domain-name-search/?q=${kw}&ftld[]=com`;
-      const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
-      const $ = cheerio.load(res.data);
-      const rows = parseRows($);
-      const sample = rows.slice(0, 3).map(r => `${r.domain}(bl=${r.bl},y=${r.aby},acr=${r.acr})`);
-      lines.push(`${kw}: HTTP${res.status} | ${rows.length} строк | ${sample.join(', ') || 'пусто'}`);
-    } catch (e) {
-      lines.push(`${kw}: ошибка — ${e.message}`);
-    }
-    await new Promise(r => setTimeout(r, 800));
+  try {
+    const url = 'https://www.expireddomains.net/domain-name-search/?q=nyc&ftld[]=com';
+    const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
+    const $ = cheerio.load(res.data);
+
+    lines.push(`HTTP ${res.status} | HTML: ${res.data.length} bytes`);
+    lines.push(`<table> найдено: ${$('table').length}`);
+    lines.push(`<tr> найдено: ${$('tr').length}`);
+    lines.push(`<td> найдено: ${$('td').length}`);
+
+    // Show all table class names
+    const tableClasses = [];
+    $('table').each((_, t) => {
+      const cls = $(t).attr('class') || $(t).attr('id') || 'no-class';
+      tableClasses.push(cls);
+    });
+    if (tableClasses.length)
+      lines.push(`Table classes: ${tableClasses.slice(0, 5).join(', ')}`);
+
+    // Show first domain-like link
+    const links = [];
+    $('a').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      const text = $(a).text().trim();
+      if (text.includes('.com') || text.includes('.net')) links.push(text);
+    });
+    if (links.length)
+      lines.push(`Первые ссылки: ${links.slice(0, 5).join(', ')}`);
+    else
+      lines.push('Ссылок с доменами не найдено');
+
+    // Show page title and a snippet
+    lines.push(`Title: ${$('title').text().trim()}`);
+
+    // Check if login form present
+    if ($('input[type="password"]').length)
+      lines.push('⚠️ Обнаружена форма логина — сайт требует авторизации');
+
+    // Show raw HTML snippet (first 400 chars of body)
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 400);
+    lines.push(`Текст страницы: ${bodyText}`);
+
+  } catch (e) {
+    lines.push(`Ошибка: ${e.message}`);
   }
   return lines;
 }
