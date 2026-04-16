@@ -5,7 +5,7 @@ import {
   initDb, isDomainSeen, saveDomain, updateDomainStatus,
   getApprovedDomainsPage, getAllApprovedDomains,
   getStats, getDomainInfo, getDomainById,
-  upsertUser, getUsers,
+  upsertUser, getUsers, removeUser,
 } from './db.js';
 import { filterDomain, detectNiche } from './filter.js';
 import { getFilterConfig, updateFilterConfig, SETTING_KEYS } from './config.js';
@@ -323,6 +323,17 @@ bot.command('stop', async (ctx) => {
     await ctx.reply('⏹️ Мониторинг остановлен.');
   } else {
     await ctx.reply('⚠️ Мониторинг не был запущен.');
+  }
+});
+
+bot.command('unsubscribe', async (ctx) => {
+  console.log('[bot] Команда /unsubscribe');
+  try {
+    removeUser(ctx.chat.id);
+    await ctx.reply('👋 Вы отписались от уведомлений. Отправьте /start чтобы подписаться снова.');
+  } catch (err) {
+    console.error('[bot] Ошибка /unsubscribe:', err.message);
+    await ctx.reply('❌ Ошибка при отписке.');
   }
 });
 

@@ -148,6 +148,13 @@ export function getUsers() {
   return db.prepare('SELECT chat_id FROM users').all().map(r => r.chat_id);
 }
 
+/** Removes a user from the users table. */
+export function removeUser(chatId) {
+  const db = getDb();
+  db.prepare('DELETE FROM users WHERE chat_id = ?').run(String(chatId));
+  console.log(`[db] Пользователь удалён: ${chatId}`);
+}
+
 // ─── Filter settings ──────────────────────────────────────────────────────────
 
 export function getFilterSetting(key) {
