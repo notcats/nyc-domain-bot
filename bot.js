@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
-import cron from 'node-cron';
 import { lookupDomain } from './src/whois.js';
 import store from './src/store.js';
 
@@ -88,7 +87,8 @@ bot.command('remove', ctx => {
   }
 });
 
-cron.schedule('0 6 * * *', async () => {
+// Ежедневная проверка в 06:00 UTC (≈ 09:00 МСК)
+async function runDailyCheck() {
   const allChats = store.getAllChats();
   for (const [chatId, domains] of Object.entries(allChats)) {
     for (const domain of domains) {
@@ -106,7 +106,17 @@ cron.schedule('0 6 * * *', async () => {
       } catch { /* продолжаем цикл при ошибке одного домена */ }
     }
   }
-});
+}
+
+let _lastDailyRun = null;
+setInterval(() => {
+  const now = new Date();
+  const key = now.toISOString().split('T')[0];
+  if (now.getUTCHours() === 6 && now.getUTCMinutes() === 0 && _lastDailyRun !== key) {
+    _lastDailyRun = key;
+    runDailyCheck();
+  }
+}, 60_000);
 
 bot.launch();
 console.log('NYC Domain Bot запущен');
