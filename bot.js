@@ -1,8 +1,8 @@
-require('dotenv').config();
-const { Telegraf } = require('telegraf');
-const cron = require('node-cron');
-const { lookupDomain } = require('./src/whois');
-const store = require('./src/store');
+import 'dotenv/config';
+import { Telegraf } from 'telegraf';
+import cron from 'node-cron';
+import { lookupDomain } from './src/whois.js';
+import store from './src/store.js';
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -12,10 +12,10 @@ const HELP = [
   'Слежу за датами истечения ваших доменов и предупреждаю заранее.',
   '',
   'Команды:',
-  '/add `<домен>` — добавить домен в список',
-  '/list — показать все домены с датами',
+  '/add `<домен>` — добавить домен',
+  '/list — список доменов с датами',
   '/check `<домен>` — разовая проверка',
-  '/remove `<домен>` — убрать домен из списка',
+  '/remove `<домен>` — убрать домен',
 ].join('\n');
 
 function daysUntil(date) {
@@ -88,7 +88,6 @@ bot.command('remove', ctx => {
   }
 });
 
-// Ежедневная проверка в 09:00 МСК (06:00 UTC)
 cron.schedule('0 6 * * *', async () => {
   const allChats = store.getAllChats();
   for (const [chatId, domains] of Object.entries(allChats)) {
@@ -104,7 +103,7 @@ cron.schedule('0 6 * * *', async () => {
             { parse_mode: 'Markdown' }
           );
         }
-      } catch { /* не прерываем цикл при ошибке одного домена */ }
+      } catch { /* продолжаем цикл при ошибке одного домена */ }
     }
   }
 });

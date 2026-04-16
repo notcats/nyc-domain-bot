@@ -1,4 +1,4 @@
-const whois = require('whois');
+import whois from 'whois';
 
 const EXPIRY_PATTERNS = [
   /Registry Expiry Date:\s*(\S+)/i,
@@ -19,7 +19,7 @@ function parseExpiry(raw) {
   return null;
 }
 
-function lookupDomain(domain) {
+export function lookupDomain(domain) {
   return new Promise((resolve, reject) => {
     whois.lookup(domain, { timeout: 10000 }, (err, data) => {
       if (err) return reject(new Error(err.message || String(err)));
@@ -28,5 +28,3 @@ function lookupDomain(domain) {
     });
   });
 }
-
-module.exports = { lookupDomain };
