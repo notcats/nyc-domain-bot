@@ -1,4 +1,4 @@
-import whois from 'whois';
+import net from 'net';
 
 const EXPIRY_PATTERNS = [
   /Registry Expiry Date:\s*(\S+)/i,
@@ -19,12 +19,32 @@ function parseExpiry(raw) {
   return null;
 }
 
-export function lookupDomain(domain) {
+function rawWhois(server, query) {
   return new Promise((resolve, reject) => {
-    whois.lookup(domain, { timeout: 10000 }, (err, data) => {
-      if (err) return reject(new Error(err.message || String(err)));
-      if (!data) return reject(new Error('Empty WHOIS response'));
-      resolve({ expiry: parseExpiry(data) });
-    });
+    let data = '';
+    const socket = net.createConnection(43, server);
+    socket.setTimeout(10000);
+    socket.on('connect', () => socket.write(query + '\r\n'));
+    socket.on('data', chunk => { data += chunk.toString(); });
+    socket.on('end', () => resolve(data));
+    socket.on('error', reject);
+    socket.on('timeout', () => { socket.destroy(); reject(new Error('WHOIS timeout')); });
   });
+}
+
+export async function lookupDomain(domain) {
+  // Ask IANA which WHOIS server handles this TLD
+  const ianaData = await rawWhois('whois.iana.org', domain);
+  const serverMatch = ianaData.match(/whois:\s+(\S+)/i);
+
+  let response = ianaData;
+  if (serverMatch) {
+    try {
+      response = await rawWhois(serverMatch[1], domain);
+    } catch {
+      // fall back to IANA response
+    }
+  }
+
+  return { expiry: parseExpiry(response) };
 }
