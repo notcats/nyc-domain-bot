@@ -3,6 +3,11 @@ import { Telegraf } from 'telegraf';
 import { lookupDomain } from './src/whois.js';
 import store from './src/store.js';
 
+if (!process.env.BOT_TOKEN) {
+  console.error('ERROR: BOT_TOKEN is not set');
+  process.exit(1);
+}
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 const HELP = [
@@ -87,7 +92,6 @@ bot.command('remove', ctx => {
   }
 });
 
-// Ежедневная проверка в 06:00 UTC (≈ 09:00 МСК)
 async function runDailyCheck() {
   const allChats = store.getAllChats();
   for (const [chatId, domains] of Object.entries(allChats)) {
@@ -118,6 +122,8 @@ setInterval(() => {
   }
 }, 60_000);
 
+// Удаляем вебхук перед запуском, чтобы не было конфликта с polling
+await bot.telegram.deleteWebhook({ drop_pending_updates: true });
 bot.launch();
 console.log('NYC Domain Bot запущен');
 
