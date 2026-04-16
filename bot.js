@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Telegraf } from 'telegraf';
+import { Bot } from 'grammy';
 import { lookupDomain } from './src/whois.js';
 import store from './src/store.js';
 
@@ -8,7 +8,7 @@ if (!process.env.BOT_TOKEN) {
   process.exit(1);
 }
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
+const bot = new Bot(process.env.BOT_TOKEN);
 
 const HELP = [
   '🏙️ *NYC Domain Bot*',
@@ -35,23 +35,23 @@ function formatInfo(domain, info) {
   return `${emoji} *${domain}*\n📅 ${dateStr} (${label})`;
 }
 
-bot.start(ctx => ctx.replyWithMarkdown(HELP));
-bot.help(ctx => ctx.replyWithMarkdown(HELP));
+bot.command('start', ctx => ctx.reply(HELP, { parse_mode: 'Markdown' }));
+bot.command('help',  ctx => ctx.reply(HELP, { parse_mode: 'Markdown' }));
 
 bot.command('check', async ctx => {
-  const domain = ctx.message.text.split(' ')[1]?.toLowerCase().trim();
+  const domain = ctx.match?.toLowerCase().trim();
   if (!domain) return ctx.reply('Укажите домен: /check example.nyc');
   await ctx.reply(`🔍 Проверяю ${domain}…`);
   try {
     const info = await lookupDomain(domain);
-    ctx.replyWithMarkdown(formatInfo(domain, info));
+    ctx.reply(formatInfo(domain, info), { parse_mode: 'Markdown' });
   } catch (e) {
     ctx.reply(`❌ Ошибка WHOIS: ${e.message}`);
   }
 });
 
 bot.command('add', async ctx => {
-  const domain = ctx.message.text.split(' ')[1]?.toLowerCase().trim();
+  const domain = ctx.match?.toLowerCase().trim();
   if (!domain) return ctx.reply('Укажите домен: /add example.nyc');
   const chatId = String(ctx.chat.id);
   if (store.getDomains(chatId).includes(domain))
@@ -60,7 +60,7 @@ bot.command('add', async ctx => {
   await ctx.reply(`✅ ${domain} добавлен. Проверяю WHOIS…`);
   try {
     const info = await lookupDomain(domain);
-    ctx.replyWithMarkdown(formatInfo(domain, info));
+    ctx.reply(formatInfo(domain, info), { parse_mode: 'Markdown' });
   } catch (e) {
     ctx.reply(`⚠️ Домен добавлен, но WHOIS недоступен: ${e.message}`);
   }
@@ -78,11 +78,11 @@ bot.command('list', async ctx => {
       catch { return `❓ *${d}* — WHOIS недоступен`; }
     })
   );
-  ctx.replyWithMarkdown(lines.join('\n\n'));
+  ctx.reply(lines.join('\n\n'), { parse_mode: 'Markdown' });
 });
 
 bot.command('remove', ctx => {
-  const domain = ctx.message.text.split(' ')[1]?.toLowerCase().trim();
+  const domain = ctx.match?.toLowerCase().trim();
   if (!domain) return ctx.reply('Укажите домен: /remove example.nyc');
   const chatId = String(ctx.chat.id);
   if (store.removeDomain(chatId, domain)) {
@@ -101,13 +101,13 @@ async function runDailyCheck() {
         if (!info.expiry) continue;
         const days = daysUntil(info.expiry);
         if (days >= 0 && days <= 30) {
-          await bot.telegram.sendMessage(
+          await bot.api.sendMessage(
             chatId,
             `⚠️ *Напоминание!*\n${formatInfo(domain, info)}`,
             { parse_mode: 'Markdown' }
           );
         }
-      } catch { /* продолжаем цикл при ошибке одного домена */ }
+      } catch { }
     }
   }
 }
@@ -122,10 +122,8 @@ setInterval(() => {
   }
 }, 60_000);
 
-// Удаляем вебхук перед запуском, чтобы не было конфликта с polling
-await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-bot.launch();
+bot.start();
 console.log('NYC Domain Bot запущен');
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => bot.stop());
+process.once('SIGTERM', () => bot.stop());
