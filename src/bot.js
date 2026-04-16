@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { Bot, InlineKeyboard } from 'grammy';
-import { scrapeExpiredDomains } from './scraper.js';
+import { scrapeExpiredDomains, debugScrape } from './scraper.js';
 import { scrapeGodaddy, godaddyLink } from './godaddy.js';
 import { checkWayback, waybackLink } from './wayback.js';
 import { insertDomain, domainExists, updateStatus, getApproved, getStats } from './db.js';
@@ -56,15 +56,15 @@ async function runScan() {
   try { all.push(...await scrapeGodaddy()); }
   catch (e) { console.error('GoDaddy error:', e.message); }
 
-  // Deduplicate
   const seen = new Set();
   const unique = all.filter(d => { if (seen.has(d.domain)) return false; seen.add(d.domain); return true; });
 
-  console.log(`Candidates: ${unique.length}`);
+  console.log(`Candidates after dedup: ${unique.length}`);
+  let newCount = 0;
 
   for (const d of unique) {
     if (domainExists(d.domain)) continue;
-    await new Promise(r => setTimeout(r, 2500)); // polite delay
+    await new Promise(r => setTimeout(r, 2500));
 
     const wb = await checkWayback(d.domain);
     if (!wb.clean) {
@@ -74,19 +74,42 @@ async function runScan() {
 
     insertDomain({ ...d, status: 'pending', wayback_clean: 1 });
     await sendDomain(d.domain, d, wb);
+    newCount++;
   }
-  console.log('Scan complete');
+  console.log(`Scan complete. New domains sent: ${newCount}`);
+  return newCount;
 }
 
 // ── Commands ───────────────────────────────────────────────────
 bot.command('start', ctx => {
   startScheduler(runScan, parseInt(process.env.CHECK_INTERVAL) || 30);
-  ctx.reply('✅ Мониторинг запущен! Проверка каждые 30 минут.\n\nКоманды:\n/stop — остановить\n/status — статистика\n/found — одобренные домены\n/check <домен> — ручная проверка');
+  ctx.reply('✅ Мониторинг запущен! Проверка каждые 30 минут.\n\nКоманды:\n/stop — остановить\n/scan — запустить сканирование сейчас\n/status — статистика\n/found — одобренные домены\n/check <домен> — ручная проверка Wayback\n/debug — диагностика scrapers');
 });
 
 bot.command('stop', ctx => {
   stopScheduler();
   ctx.reply('⏹ Мониторинг остановлен.');
+});
+
+bot.command('scan', async ctx => {
+  await ctx.reply('🔍 Запускаю сканирование...');
+  try {
+    const found = await runScan();
+    const s = getStats();
+    ctx.reply(`✅ Готово. Новых доменов отправлено: ${found}\nВсего в базе: ${s.total} | Одобрено: ${s.approved} | На рассмотрении: ${s.pending}`);
+  } catch (e) {
+    ctx.reply(`❌ Ошибка: ${e.message}`);
+  }
+});
+
+bot.command('debug', async ctx => {
+  await ctx.reply('🔬 Проверяю scrapers... (займёт ~30 сек)');
+  try {
+    const lines = await debugScrape();
+    ctx.reply('*Диагностика expireddomains.net:*\n' + lines.join('\n'), { parse_mode: 'Markdown' });
+  } catch (e) {
+    ctx.reply(`❌ Ошибка: ${e.message}`);
+  }
 });
 
 bot.command('status', ctx => {
