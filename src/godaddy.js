@@ -9,30 +9,24 @@ const HEADERS = {
 
 export async function scrapeGodaddy() {
   const results = [];
-  const keywords = ['nyc', 'newyork', 'manhattan', 'brooklyn'];
-
-  for (const kw of keywords) {
+  for (const kw of ['nyc', 'newyork', 'manhattan', 'brooklyn']) {
     await new Promise(r => setTimeout(r, 2500));
     try {
-      const url =
-        `https://auctions.godaddy.com/trpSearchResults.aspx?` +
+      const url = `https://auctions.godaddy.com/trpSearchResults.aspx?` +
         `searchType=expired&status=auctions&keyword=${kw}&tlds=com`;
       const res = await axios.get(url, { headers: HEADERS, timeout: 20000 });
       const $ = cheerio.load(res.data);
-
-      $('[data-domain], .auction-result-row, .domain-listing').each((_, el) => {
-        const domain =
-          $(el).attr('data-domain') ||
-          $(el).find('.domain-name, .domainname, [class*="domain"]').first().text().trim();
+      $('[data-domain], .auction-result-row').each((_, el) => {
+        const domain = ($(el).attr('data-domain') ||
+          $(el).find('[class*="domain"]').first().text().trim()).toLowerCase();
         if (!domain || !domain.endsWith('.com')) return;
-        const price = $(el).find('[class*="price"], [class*="bid"], .price').first().text().trim();
-        if (filterDomain(domain, { tld: '.com' })) {
-          results.push({ domain: domain.toLowerCase(), bl: 0, aby: 0, acr: 0,
-            price: price || 'N/A', source: 'godaddy', niche: guessNiche(domain) });
-        }
+        const price = $(el).find('[class*="price"], [class*="bid"]').first().text().trim();
+        if (filterDomain(domain, { tld: '.com' }))
+          results.push({ domain, bl: 0, aby: 0, acr: 0, price: price || 'N/A',
+            source: 'godaddy', niche: guessNiche(domain) });
       });
     } catch (e) {
-      console.error(`GoDaddy [${kw}]: ${e.message}`);
+      console.error(`GoDaddy [${kw}]:`, e.message);
     }
   }
   return results;
