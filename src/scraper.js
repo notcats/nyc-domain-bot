@@ -5,7 +5,9 @@ const NYC_PREFIXES = ['nyc', 'newyork', 'manhattan', 'brooklyn', 'queens', 'bron
 async function findDomainsFromCDX(prefix) {
   const domains = new Set();
   try {
-    const url = `https://web.archive.org/cdx/search/cdx?url=${prefix}*.com&output=json&fl=original&collapse=urlkey&limit=500&from=20050101&to=20190101&filter=statuscode:200`;
+    // SURT key format: com,nyc matches nyc.com, nyclaw.com, nycplumber.com, etc.
+    const surt = `com,${prefix}`;
+    const url = `https://web.archive.org/cdx/search/cdx?url=${surt}&matchType=prefix&output=json&fl=original&collapse=urlkey&limit=500&from=20050101&to=20190101&filter=statuscode:200`;
     const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
     if (!res.ok) return [];
     const data = await res.json();
@@ -69,15 +71,16 @@ export async function debugScrape() {
   const lines = [];
   for (const prefix of NYC_PREFIXES.slice(0, 3)) {
     try {
-      const url = `https://web.archive.org/cdx/search/cdx?url=${prefix}*.com&output=json&fl=original&collapse=urlkey&limit=20&from=20100101&to=20190101&filter=statuscode:200`;
+      const surt = `com,${prefix}`;
+      const url = `https://web.archive.org/cdx/search/cdx?url=${surt}&matchType=prefix&output=json&fl=original&collapse=urlkey&limit=20&from=20100101&to=20190101&filter=statuscode:200`;
       const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
       const data = await res.json();
       const sample = data.slice(1, 4).map(([o]) => {
         try { return new URL(o.startsWith('http') ? o : `https://${o}`).hostname.replace(/^www\./, ''); } catch { return o; }
       });
-      lines.push(`CDX[${prefix}*.com]: HTTP${res.status} | ${data.length - 1} результатов | ${sample.join(', ') || 'пусто'}`);
+      lines.push(`CDX[${surt}]: HTTP${res.status} | ${data.length - 1} результатов | ${sample.join(', ') || 'пусто'}`);
     } catch (e) {
-      lines.push(`CDX[${prefix}]: ошибка — ${e.message}`);
+      lines.push(`CDX[com,${prefix}]: ошибка — ${e.message}`);
     }
     await new Promise(r => setTimeout(r, 500));
   }
