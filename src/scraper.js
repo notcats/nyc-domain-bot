@@ -1,6 +1,9 @@
 import { guessNiche } from './filter.js';
+import { getCustomWords } from './db.js';
 
-const WORDLIST = [
+const NYC_PREFIXES = ['nyc', 'newyork', 'manhattan', 'brooklyn', 'queens', 'bronx'];
+
+const BASE_WORDLIST = [
   'nyclaw.com','nyclawyer.com','nyclegal.com','nycattorney.com',
   'nycrealty.com','nycrealestate.com','nycrealtor.com','nychomes.com','nycproperty.com',
   'nycplumber.com','nycplumbing.com','nycelectrician.com','nychvac.com',
@@ -46,20 +49,33 @@ const WORDLIST = [
   'bronxcontractor.com','bronxplumber.com','bronxbusiness.com',
 ];
 
+function expandWord(word) {
+  return [
+    ...NYC_PREFIXES.map(p => `${p}${word}.com`),
+    `nyc-${word}.com`,
+    `manhattan-${word}.com`,
+  ];
+}
+
+function buildWordlist() {
+  const custom = getCustomWords().flatMap(expandWord);
+  return [...new Set([...BASE_WORDLIST, ...custom])];
+}
+
 let scanIndex = 0;
 
-// Verisign is the authoritative .com registry — 404 = truly unregistered
 async function isAvailable(domain) {
   const res = await fetch(
     `https://rdap.verisign.com/com/v1/domain/${domain.replace(/\.com$/, '')}`,
     { signal: AbortSignal.timeout(8000) }
   );
-  if (res.status === 404) return true;   // not in registry = available
-  if (res.status === 200) return false;  // registered
+  if (res.status === 404) return true;
+  if (res.status === 200) return false;
   throw new Error(`RDAP ${res.status}`);
 }
 
 export async function scrapeExpiredDomains() {
+  const WORDLIST = buildWordlist();
   const results = [];
   const BATCH = 40;
 
@@ -81,7 +97,8 @@ export async function scrapeExpiredDomains() {
 }
 
 export async function debugScrape() {
-  const lines = ['Источник: Verisign RDAP (авторитетный реестр .com)', ''];
+  const WORDLIST = buildWordlist();
+  const lines = [`Verisign RDAP | Доменов в списке: ${WORDLIST.length}`, ''];
   for (const domain of WORDLIST.slice(0, 10)) {
     try {
       const avail = await isAvailable(domain);

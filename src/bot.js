@@ -3,7 +3,11 @@ import { Bot, InlineKeyboard } from 'grammy';
 import { scrapeExpiredDomains, debugScrape } from './scraper.js';
 import { scrapeGodaddy, godaddyLink } from './godaddy.js';
 import { checkWayback, waybackLink } from './wayback.js';
-import { insertDomain, domainExists, updateStatus, getApproved, getStats } from './db.js';
+import { getMetrics } from './majestic.js';
+import {
+  insertDomain, domainExists, updateStatus, getApproved, getStats,
+  getCustomWords, addCustomWord, removeCustomWord,
+} from './db.js';
 import { startScheduler, stopScheduler, isRunning } from './scheduler.js';
 
 if (!process.env.BOT_TOKEN) {
@@ -14,19 +18,19 @@ if (!process.env.BOT_TOKEN) {
 const bot     = new Bot(process.env.BOT_TOKEN);
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// ── Helpers ───────────────────────────────────────────────────
-function domainCard(domain, d, wb) {
-  const year = (d.aby > 0 ? d.aby : wb?.firstYear) || 'н/д';
-  const bl   = d.bl  > 0 ? d.bl  : '[проверить]';
+function domainCard(domain, d, wb, m) {
+  const year   = (d.aby > 0 ? d.aby : wb?.firstYear) || 'н/д';
+  const mLine  = m
+    ? `TF:${m.tf} | CF:${m.cf} | RD:${m.rd}`
+    : (process.env.MAJESTIC_KEY ? 'TF: нет данных' : 'TF: [добавь MAJESTIC_KEY]');
   return [
     '🌐 *НОВЫЙ ДОМЕН НАЙДЕН*', '',
     `Домен: \`${domain}\``,
     `📅 Год: ${year}`,
-    `🔗 Бэклинки: ${bl}`,
+    `📊 ${mLine}`,
     `📦 Архивов: ${d.acr || wb?.snapshots || 'н/д'}`,
     `🏷️ Ниша: ${d.niche || 'General NYC'}`,
-    `💰 Цена: ${d.price || 'н/д'}`,
-    `📊 Источник: ${d.source}`,
+    `📡 Источник: ${d.source}`,
     '',
     `🔍 Wayback: ${wb?.clean ? 'реальный сайт ✅' : '⚠️ ' + (wb?.reason || 'не проверен')}`,
   ].join('\n');
@@ -39,15 +43,14 @@ function actionKeyboard(domain) {
     .text('🔍 ПОДРОБНЕЕ',  `more:${domain}`);
 }
 
-async function sendDomain(domain, d, wb) {
+async function sendDomain(domain, d, wb, m) {
   if (!CHAT_ID) return;
-  await bot.api.sendMessage(CHAT_ID, domainCard(domain, d, wb), {
+  await bot.api.sendMessage(CHAT_ID, domainCard(domain, d, wb, m), {
     parse_mode: 'Markdown',
     reply_markup: actionKeyboard(domain),
   });
 }
 
-// ── Scan job ───────────────────────────────────────────────────
 async function runScan() {
   console.log(`[${new Date().toISOString()}] Scan started`);
   const all = [];
@@ -62,23 +65,34 @@ async function runScan() {
   const unique = all.filter(d => { if (seen.has(d.domain)) return false; seen.add(d.domain); return true; });
   console.log(`Candidates: ${unique.length}`);
 
+  const minTF = process.env.MAJESTIC_KEY ? parseInt(process.env.MIN_TF || '10') : 0;
+
   let newCount = 0;
   for (const d of unique) {
     if (domainExists(d.domain)) continue;
     await new Promise(r => setTimeout(r, 2500));
 
-    const wb = await checkWayback(d.domain);
+    const wb  = await checkWayback(d.domain);
     const aby = d.aby || wb.firstYear || 0;
-    const acr = d.acr || wb.snapshots || 0;
+    const acr = d.acr || wb.snapshots  || 0;
 
     if (!wb.clean || acr < 3) {
       insertDomain({ ...d, aby, acr, status: 'rejected', wayback_clean: 0 });
       continue;
     }
 
-    const enriched = { ...d, aby, acr };
+    const m  = await getMetrics(d.domain);
+    const tf = m?.tf || 0;
+
+    if (minTF > 0 && tf < minTF) {
+      console.log(`${d.domain}: TF=${tf} < MIN_TF=${minTF}, skip`);
+      insertDomain({ ...d, aby, acr, tf, cf: m?.cf||0, rd: m?.rd||0, status: 'rejected', reason: `tf=${tf}` });
+      continue;
+    }
+
+    const enriched = { ...d, aby, acr, tf, cf: m?.cf||0, rd: m?.rd||0 };
     insertDomain({ ...enriched, status: 'pending', wayback_clean: 1 });
-    await sendDomain(d.domain, enriched, wb);
+    await sendDomain(d.domain, enriched, wb, m);
     newCount++;
   }
   console.log(`Scan complete. New: ${newCount}`);
@@ -88,7 +102,18 @@ async function runScan() {
 // ── Commands ───────────────────────────────────────────────────
 bot.command('start', ctx => {
   startScheduler(runScan, parseInt(process.env.CHECK_INTERVAL) || 30);
-  ctx.reply('✅ Мониторинг запущен! Проверка каждые 30 минут.\n\n/stop — остановить\n/scan — запустить скан сейчас\n/status — статистика\n/found — одобренные\n/check <домен> — Wayback\n/debug — диагностика');
+  ctx.reply(
+    '✅ Мониторинг запущен!\n\n' +
+    '/stop — остановить\n' +
+    '/scan — скан сейчас\n' +
+    '/status — статус\n' +
+    '/found — одобренные домены\n' +
+    '/addword <слово> — добавить слово поиска\n' +
+    '/words — список слов\n' +
+    '/removeword <слово> — удалить слово\n' +
+    '/check <домен> — проверить домен\n' +
+    '/debug — диагностика'
+  );
 });
 
 bot.command('stop', ctx => {
@@ -108,41 +133,67 @@ bot.command('scan', async ctx => {
 });
 
 bot.command('debug', async ctx => {
-  await ctx.reply('🔬 Проверяю RDAP... (~30 сек)');
+  await ctx.reply('🔬 Проверяю...');
   try {
     const lines = await debugScrape();
-    ctx.reply('Диагностика (RDAP):\n' + lines.join('\n'));
+    ctx.reply(lines.join('\n'));
   } catch (e) {
     ctx.reply(`❌ ${e.message}`);
   }
 });
 
 bot.command('status', ctx => {
-  const s = getStats();
+  const s     = getStats();
+  const minTF = process.env.MAJESTIC_KEY ? parseInt(process.env.MIN_TF || '10') : null;
   ctx.reply([
     '📊 Статус бота',
     `Мониторинг: ${isRunning() ? '✅ активен' : '⏹ остановлен'}`,
     `Всего: ${s.total} | ✅ ${s.approved} | ❌ ${s.rejected} | ⏳ ${s.pending}`,
+    `Majestic: ${process.env.MAJESTIC_KEY ? `✅ MIN_TF=${minTF}` : '❌ не настроен'}`,
+    `Пользовательских слов: ${getCustomWords().length}`,
   ].join('\n'));
 });
 
 bot.command('found', ctx => {
   const list = getApproved();
   if (!list.length) return ctx.reply('Список пуст.');
-  ctx.reply('✅ Одобренные:\n' + list.map(d => `${d.domain} - ${d.niche}`).join('\n'));
+  ctx.reply('✅ Одобренные:\n' + list.map(d => `${d.domain} TF:${d.tf ?? '?'} - ${d.niche}`).join('\n'));
 });
 
 bot.command('check', async ctx => {
   const domain = ctx.match?.toLowerCase().trim();
   if (!domain) return ctx.reply('Укажите домен: /check example.com');
   await ctx.reply(`🔍 Проверяю ${domain}...`);
-  const wb = await checkWayback(domain);
+  const [wb, m] = await Promise.all([checkWayback(domain), getMetrics(domain)]);
   ctx.reply([
-    `${domain}`,
+    domain,
     `Wayback: ${wb.clean ? '✅ реальный' : '❌ ' + wb.reason}`,
-    `Снимков: ${wb.snapshots} | Первый год: ${wb.firstYear || 'n/a'}`,
-    wb.snapshotUrl ? wb.snapshotUrl : '',
+    `Снимков: ${wb.snapshots} | Год: ${wb.firstYear || 'n/a'}`,
+    m ? `TF:${m.tf} CF:${m.cf} RD:${m.rd}` : 'Majestic: не настроен',
+    wb.snapshotUrl || '',
   ].filter(Boolean).join('\n'));
+});
+
+bot.command('addword', ctx => {
+  const raw = ctx.match?.toLowerCase().trim().replace(/[^a-z0-9-]/g, '');
+  if (!raw) return ctx.reply('Укажите слово: /addword dentist');
+  const ok = addCustomWord(raw);
+  if (!ok) return ctx.reply(`${raw} уже в списке.`);
+  const examples = ['nyc', 'manhattan', 'brooklyn'].map(p => `${p}${raw}.com`).join(', ');
+  ctx.reply(`✅ Добавлено: ${raw}\nБудут проверяться: ${examples} и др.`);
+});
+
+bot.command('words', ctx => {
+  const words = getCustomWords();
+  if (!words.length) return ctx.reply('Список пуст.\n/addword <слово> — добавить');
+  ctx.reply('📝 Пользовательские слова:\n' + words.map(w => `• ${w}`).join('\n'));
+});
+
+bot.command('removeword', ctx => {
+  const word = ctx.match?.toLowerCase().trim();
+  if (!word) return ctx.reply('Укажите слово: /removeword dentist');
+  const ok = removeCustomWord(word);
+  ctx.reply(ok ? `🗑 ${word} удалён.` : `${word} не найден в списке.`);
 });
 
 // ── Callbacks ──────────────────────────────────────────────────
@@ -164,14 +215,15 @@ bot.callbackQuery(/^more:(.+)$/, async ctx => {
   const domain = ctx.match[1];
   await ctx.answerCallbackQuery();
   ctx.reply([
-    `${domain}`,
+    domain,
     `Wayback: ${waybackLink(domain)}`,
+    `Majestic: https://majestic.com/reports/site-explorer?IndexDataSource=F&oq=${domain}`,
     `Ahrefs: https://ahrefs.com/website-authority-checker/?target=${domain}`,
     `GoDaddy: ${godaddyLink(domain)}`,
   ].join('\n'));
 });
 
-// ── Boot (with 409 conflict retry) ─────────────────────────────────
+// ── Boot ──────────────────────────────────────────────────────
 if (CHAT_ID) {
   startScheduler(runScan, parseInt(process.env.CHECK_INTERVAL) || 30);
 }
