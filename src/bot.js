@@ -53,7 +53,7 @@ async function runScan() {
   const all = [];
 
   try { all.push(...await scrapeExpiredDomains()); }
-  catch (e) { console.error('ExpiredDomains error:', e.message); }
+  catch (e) { console.error('Scraper error:', e.message); }
 
   try { all.push(...await scrapeGodaddy()); }
   catch (e) { console.error('GoDaddy error:', e.message); }
@@ -71,7 +71,7 @@ async function runScan() {
     const aby = d.aby || wb.firstYear || 0;
     const acr = d.acr || wb.snapshots || 0;
 
-    if (!wb.clean || acr < 5 || (aby > 0 && aby > 2018)) {
+    if (!wb.clean || acr < 3) {
       insertDomain({ ...d, aby, acr, status: 'rejected', wayback_clean: 0 });
       continue;
     }
@@ -88,7 +88,7 @@ async function runScan() {
 // ── Commands ───────────────────────────────────────────────────
 bot.command('start', ctx => {
   startScheduler(runScan, parseInt(process.env.CHECK_INTERVAL) || 30);
-  ctx.reply('✅ Мониторинг запущен! Проверка каждые 30 минут.\n\n/stop — остановить\n/scan — запустить скан сейчас\n/status — статистика\n/found — одобренные домены\n/check <домен> — Wayback проверка\n/debug — диагностика');
+  ctx.reply('✅ Мониторинг запущен! Проверка каждые 30 минут.\n\n/stop — остановить\n/scan — запустить скан сейчас\n/status — статистика\n/found — одобренные\n/check <домен> — Wayback\n/debug — диагностика');
 });
 
 bot.command('stop', ctx => {
@@ -101,69 +101,62 @@ bot.command('scan', async ctx => {
   try {
     const found = await runScan();
     const s = getStats();
-    ctx.reply(`✅ Готово. Новых доменов: ${found}\nВсего: ${s.total} | Одобрено: ${s.approved} | На рассм.: ${s.pending}`);
+    ctx.reply(`✅ Готово. Новых: ${found} | Всего: ${s.total} | Одобр.: ${s.approved}`);
   } catch (e) {
-    ctx.reply(`❌ Ошибка: ${e.message}`);
+    ctx.reply(`❌ ${e.message}`);
   }
 });
 
 bot.command('debug', async ctx => {
-  await ctx.reply('🔬 Проверяю CDX... (~15 сек)');
+  await ctx.reply('🔬 Проверяю RDAP... (~30 сек)');
   try {
     const lines = await debugScrape();
-    ctx.reply('*Wayback CDX:*\n' + lines.join('\n'), { parse_mode: 'Markdown' });
+    ctx.reply('Диагностика (RDAP):\n' + lines.join('\n'));
   } catch (e) {
-    ctx.reply(`❌ Ошибка: ${e.message}`);
+    ctx.reply(`❌ ${e.message}`);
   }
 });
 
 bot.command('status', ctx => {
   const s = getStats();
   ctx.reply([
-    '*📊 Статус бота*',
+    '📊 Статус бота',
     `Мониторинг: ${isRunning() ? '✅ активен' : '⏹ остановлен'}`,
-    `Всего найдено: ${s.total}`,
-    `✅ Одобрено: ${s.approved}`,
-    `❌ Отклонено: ${s.rejected}`,
-    `⏳ На рассмотрении: ${s.pending}`,
-  ].join('\n'), { parse_mode: 'Markdown' });
+    `Всего: ${s.total} | ✅ ${s.approved} | ❌ ${s.rejected} | ⏳ ${s.pending}`,
+  ].join('\n'));
 });
 
 bot.command('found', ctx => {
   const list = getApproved();
-  if (!list.length) return ctx.reply('Список одобренных доменов пуст.');
-  const text = list.map(d => `• \`${d.domain}\` — ${d.niche}`).join('\n');
-  ctx.reply(`✅ *Одобренные домены:*\n${text}`, { parse_mode: 'Markdown' });
+  if (!list.length) return ctx.reply('Список пуст.');
+  ctx.reply('✅ Одобренные:\n' + list.map(d => `${d.domain} - ${d.niche}`).join('\n'));
 });
 
 bot.command('check', async ctx => {
   const domain = ctx.match?.toLowerCase().trim();
   if (!domain) return ctx.reply('Укажите домен: /check example.com');
-  await ctx.reply(`🔍 Проверяю ${domain}…`);
+  await ctx.reply(`🔍 Проверяю ${domain}...`);
   const wb = await checkWayback(domain);
   ctx.reply([
-    `*${domain}*`,
-    `Wayback: ${wb.clean ? '✅ реальный сайт' : '❌ ' + wb.reason}`,
-    `Снимков: ${wb.snapshots}`,
-    `Первый год: ${wb.firstYear || 'н/д'}`,
-    wb.snapshotUrl ? `[Открыть](${wb.snapshotUrl})` : '',
-  ].filter(Boolean).join('\n'), { parse_mode: 'Markdown' });
+    `${domain}`,
+    `Wayback: ${wb.clean ? '✅ реальный' : '❌ ' + wb.reason}`,
+    `Снимков: ${wb.snapshots} | Первый год: ${wb.firstYear || 'n/a'}`,
+    wb.snapshotUrl ? wb.snapshotUrl : '',
+  ].filter(Boolean).join('\n'));
 });
 
 // ── Callbacks ──────────────────────────────────────────────────
 bot.callbackQuery(/^buy:(.+)$/, async ctx => {
   const domain = ctx.match[1];
   updateStatus(domain, 'approved');
-  await ctx.answerCallbackQuery('Домен одобрен!');
+  await ctx.answerCallbackQuery('Одобрен!');
   await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
-  ctx.reply(`✅ *${domain}* одобрен!\n[Купить на GoDaddy](${godaddyLink(domain)})`,
-    { parse_mode: 'Markdown' });
+  ctx.reply(`✅ ${domain} одобрен!\n${godaddyLink(domain)}`);
 });
 
 bot.callbackQuery(/^skip:(.+)$/, async ctx => {
-  const domain = ctx.match[1];
-  updateStatus(domain, 'rejected');
-  await ctx.answerCallbackQuery('Домен отклонён.');
+  updateStatus(ctx.match[1], 'rejected');
+  await ctx.answerCallbackQuery('Отклонён.');
   ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
 });
 
@@ -171,21 +164,35 @@ bot.callbackQuery(/^more:(.+)$/, async ctx => {
   const domain = ctx.match[1];
   await ctx.answerCallbackQuery();
   ctx.reply([
-    `🔍 *${domain}*`, '',
-    `[Wayback Machine](${waybackLink(domain)})`,
-    `[Ahrefs](https://ahrefs.com/website-authority-checker/?target=${domain})`,
-    `[expireddomains.net](https://www.expireddomains.net/domain-name-search/?q=${domain})`,
-    `[GoDaddy Auctions](${godaddyLink(domain)})`,
-  ].join('\n'), { parse_mode: 'Markdown' });
+    `${domain}`,
+    `Wayback: ${waybackLink(domain)}`,
+    `Ahrefs: https://ahrefs.com/website-authority-checker/?target=${domain}`,
+    `GoDaddy: ${godaddyLink(domain)}`,
+  ].join('\n'));
 });
 
-// ── Boot ───────────────────────────────────────────────────────
+// ── Boot (with 409 conflict retry) ─────────────────────────────────
 if (CHAT_ID) {
   startScheduler(runScan, parseInt(process.env.CHECK_INTERVAL) || 30);
 }
 
-bot.start();
-console.log('NYC Domain Bot запущен');
-
 process.once('SIGINT',  () => bot.stop());
 process.once('SIGTERM', () => bot.stop());
+
+console.log('NYC Domain Bot запускается...');
+
+const startWithRetry = async (attempt = 0) => {
+  try {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 5000 * attempt));
+    await bot.start();
+  } catch (err) {
+    if (err.error_code === 409 && attempt < 5) {
+      console.log(`Conflict 409, retry ${attempt + 1}/5 in ${5 * (attempt + 1)}s...`);
+      return startWithRetry(attempt + 1);
+    }
+    console.error('Fatal bot error:', err);
+    process.exit(1);
+  }
+};
+
+startWithRetry();
