@@ -1,11 +1,5 @@
 import { guessNiche } from './filter.js';
 
-const GD_KEY    = process.env.GODADDY_KEY;
-const GD_SECRET = process.env.GODADDY_SECRET;
-const GD_BASE   = process.env.GODADDY_ENV === 'ote'
-  ? 'https://api.ote-godaddy.com'
-  : 'https://api.godaddy.com';
-
 const WORDLIST = [
   'nyclaw.com','nyclawyer.com','nyclegal.com','nycattorney.com',
   'nycrealty.com','nycrealestate.com','nycrealtor.com','nychomes.com','nycproperty.com',
@@ -54,59 +48,31 @@ const WORDLIST = [
 
 let scanIndex = 0;
 
-async function checkAvailability(domain) {
-  if (!GD_KEY || !GD_SECRET) {
-    throw new Error('GODADDY_KEY / GODADDY_SECRET not set');
-  }
+// Verisign is the authoritative .com registry — 404 = truly unregistered
+async function isAvailable(domain) {
   const res = await fetch(
-    `${GD_BASE}/v1/domains/available?domain=${domain}&checkType=FAST`,
-    {
-      headers: {
-        'Authorization': `sso-key ${GD_KEY}:${GD_SECRET}`,
-        'Accept': 'application/json',
-      },
-      signal: AbortSignal.timeout(10000),
-    }
+    `https://rdap.verisign.com/com/v1/domain/${domain.replace(/\.com$/, '')}`,
+    { signal: AbortSignal.timeout(8000) }
   );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 100)}`);
-  }
-  return res.json(); // { available, price, currency, definitive }
+  if (res.status === 404) return true;   // not in registry = available
+  if (res.status === 200) return false;  // registered
+  throw new Error(`RDAP ${res.status}`);
 }
 
 export async function scrapeExpiredDomains() {
-  if (!GD_KEY || !GD_SECRET) {
-    console.error('GoDaddy API keys not set — skipping scrape');
-    return [];
-  }
-
   const results = [];
   const BATCH = 40;
 
   for (let i = 0; i < BATCH; i++) {
     const domain = WORDLIST[(scanIndex + i) % WORDLIST.length];
     try {
-      const data = await checkAvailability(domain);
-      if (data.available) {
-        // price is in micro-units (1/1,000,000 USD)
-        const priceUSD = Math.round((data.price || 0) / 1e6);
-        if (priceUSD <= 50) { // skip premium domains
-          results.push({
-            domain,
-            bl: 0, aby: 0, acr: 0,
-            price: priceUSD > 0 ? `$${priceUSD}` : undefined,
-            source: 'godaddy-api',
-            niche: guessNiche(domain),
-          });
-        } else {
-          console.log(`${domain}: skip premium $${priceUSD}`);
-        }
+      if (await isAvailable(domain)) {
+        results.push({ domain, bl: 0, aby: 0, acr: 0, source: 'verisign-rdap', niche: guessNiche(domain) });
       }
     } catch (e) {
-      console.error(`GoDaddy[${domain}]: ${e.message}`);
+      console.error(`RDAP[${domain}]: ${e.message}`);
     }
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 200));
   }
 
   scanIndex = (scanIndex + BATCH) % WORDLIST.length;
@@ -115,25 +81,15 @@ export async function scrapeExpiredDomains() {
 }
 
 export async function debugScrape() {
-  if (!GD_KEY || !GD_SECRET) {
-    return ['GODADDY_KEY / GODADDY_SECRET не установлены — добавь в Railway Variables'];
-  }
-
-  const env = process.env.GODADDY_ENV || 'production';
-  const lines = [`Используется: ${GD_BASE} (env: ${env})`, ''];
-
-  for (const domain of WORDLIST.slice(0, 8)) {
+  const lines = ['Источник: Verisign RDAP (авторитетный реестр .com)', ''];
+  for (const domain of WORDLIST.slice(0, 10)) {
     try {
-      const data = await checkAvailability(domain);
-      const priceUSD = Math.round((data.price || 0) / 1e6);
-      const status = data.available
-        ? (priceUSD > 50 ? `премиум $${priceUSD}` : `свободен $${priceUSD} ✅`)
-        : 'занят ❌';
-      lines.push(`${domain}: ${status}`);
+      const avail = await isAvailable(domain);
+      lines.push(`${domain}: ${avail ? 'свободен ✅' : 'занят ❌'}`);
     } catch (e) {
-      lines.push(`${domain}: ошибка — ${e.message.slice(0, 60)}`);
+      lines.push(`${domain}: ошибка — ${e.message.slice(0, 50)}`);
     }
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 200));
   }
   return lines;
 }
