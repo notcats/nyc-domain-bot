@@ -5,21 +5,20 @@ const NYC_PREFIXES = ['nyc', 'newyork', 'manhattan', 'brooklyn', 'queens', 'bron
 async function findDomainsFromCDX(prefix) {
   const domains = new Set();
   try {
-    // SURT key format: com,nyc matches nyc.com, nyclaw.com, nycplumber.com, etc.
-    const surt = `com,${prefix}`;
-    const url = `https://web.archive.org/cdx/search/cdx?url=${surt}&matchType=prefix&output=json&fl=original&collapse=urlkey&limit=500&from=20050101&to=20190101&filter=statuscode:200`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    // SURT prefix: com,nyc matches nyc.com, nyclaw.com, nycplumber.com, etc.
+    // No collapse/filter — just grab first N records fast, extract unique domains
+    const url = `https://web.archive.org/cdx/search/cdx?url=com,${prefix}&matchType=prefix&output=json&fl=original&limit=300&from=20100101&to=20190101`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
     if (!res.ok) return [];
     const data = await res.json();
     for (const [original] of data.slice(1)) {
       try {
         const u = new URL(original.startsWith('http') ? original : `https://${original}`);
         const domain = u.hostname.replace(/^www\./, '').toLowerCase();
-        if (domain.endsWith('.com') && domain.length < 50 && !domain.includes(' '))
-          domains.add(domain);
+        if (domain.endsWith('.com') && domain.length < 50) domains.add(domain);
       } catch {}
     }
-    console.log(`CDX[${prefix}]: ${domains.size} unique domains`);
+    console.log(`CDX[${prefix}]: ${domains.size} domains from ${data.length - 1} records`);
   } catch (e) {
     console.error(`CDX[${prefix}]: ${e.message}`);
   }
@@ -71,16 +70,20 @@ export async function debugScrape() {
   const lines = [];
   for (const prefix of NYC_PREFIXES.slice(0, 3)) {
     try {
-      const surt = `com,${prefix}`;
-      const url = `https://web.archive.org/cdx/search/cdx?url=${surt}&matchType=prefix&output=json&fl=original&collapse=urlkey&limit=20&from=20100101&to=20190101&filter=statuscode:200`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      const url = `https://web.archive.org/cdx/search/cdx?url=com,${prefix}&matchType=prefix&output=json&fl=original&limit=30&from=20100101&to=20190101`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
       const data = await res.json();
-      const sample = data.slice(1, 4).map(([o]) => {
-        try { return new URL(o.startsWith('http') ? o : `https://${o}`).hostname.replace(/^www\./, ''); } catch { return o; }
-      });
-      lines.push(`CDX[${surt}]: HTTP${res.status} | ${data.length - 1} результатов | ${sample.join(', ') || 'пусто'}`);
+      const domains = new Set();
+      for (const [o] of data.slice(1)) {
+        try {
+          const h = new URL(o.startsWith('http') ? o : `https://${o}`).hostname.replace(/^www\./, '');
+          if (h.endsWith('.com')) domains.add(h);
+        } catch {}
+      }
+      const sample = [...domains].slice(0, 3).join(', ');
+      lines.push(`com,${prefix}: HTTP${res.status} | ${data.length - 1} записей | ${domains.size} доменов | ${sample || 'пусто'}`);
     } catch (e) {
-      lines.push(`CDX[com,${prefix}]: ошибка — ${e.message}`);
+      lines.push(`com,${prefix}: ошибка — ${e.message}`);
     }
     await new Promise(r => setTimeout(r, 500));
   }
