@@ -2,23 +2,29 @@ import { filterDomain, guessNiche } from './filter.js';
 
 const NYC_PREFIXES = ['nyc', 'newyork', 'manhattan', 'brooklyn', 'queens', 'bronx'];
 
+// Extract root domain from SURT urlkey: "com,nyclaw,www)/path" → "nyclaw.com"
+function surtToDomain(urlkey) {
+  try {
+    const surtHost = urlkey.split(')')[0]; // "com,nyclaw,www"
+    const parts = surtHost.split(',');     // ["com", "nyclaw", "www"]
+    if (parts.length < 2) return null;
+    return `${parts[1]}.${parts[0]}`;     // "nyclaw.com"
+  } catch { return null; }
+}
+
 async function findDomainsFromCDX(prefix) {
   const domains = new Set();
   try {
-    // SURT prefix: com,nyc matches nyc.com, nyclaw.com, nycplumber.com, etc.
-    // No collapse/filter — just grab first N records fast, extract unique domains
-    const url = `https://web.archive.org/cdx/search/cdx?url=com,${prefix}&matchType=prefix&output=json&fl=original&limit=300&from=20100101&to=20190101`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    // fl=urlkey returns compact SURT keys; high limit to get past the popular single-word domain
+    const url = `https://web.archive.org/cdx/search/cdx?url=com,${prefix}&matchType=prefix&output=json&fl=urlkey&limit=5000&from=20100101&to=20190101`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(25000) });
     if (!res.ok) return [];
     const data = await res.json();
-    for (const [original] of data.slice(1)) {
-      try {
-        const u = new URL(original.startsWith('http') ? original : `https://${original}`);
-        const domain = u.hostname.replace(/^www\./, '').toLowerCase();
-        if (domain.endsWith('.com') && domain.length < 50) domains.add(domain);
-      } catch {}
+    for (const [urlkey] of data.slice(1)) {
+      const domain = surtToDomain(urlkey);
+      if (domain && domain.endsWith('.com') && domain.length < 50) domains.add(domain);
     }
-    console.log(`CDX[${prefix}]: ${domains.size} domains from ${data.length - 1} records`);
+    console.log(`CDX[${prefix}]: ${domains.size} unique domains from ${data.length - 1} records`);
   } catch (e) {
     console.error(`CDX[${prefix}]: ${e.message}`);
   }
@@ -35,9 +41,7 @@ async function isDomainExpired(domain) {
       if (exp && new Date(exp.eventDate) < new Date()) return true;
     }
     return false;
-  } catch {
-    return true;
-  }
+  } catch { return true; }
 }
 
 export async function scrapeExpiredDomains() {
@@ -51,7 +55,6 @@ export async function scrapeExpiredDomains() {
     for (const domain of candidates) {
       if (count >= 20 || checked.has(domain)) continue;
       checked.add(domain);
-
       if (!filterDomain(domain, {})) continue;
 
       const expired = await isDomainExpired(domain);
@@ -70,20 +73,18 @@ export async function debugScrape() {
   const lines = [];
   for (const prefix of NYC_PREFIXES.slice(0, 3)) {
     try {
-      const url = `https://web.archive.org/cdx/search/cdx?url=com,${prefix}&matchType=prefix&output=json&fl=original&limit=30&from=20100101&to=20190101`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      const url = `https://web.archive.org/cdx/search/cdx?url=com,${prefix}&matchType=prefix&output=json&fl=urlkey&limit=500&from=20100101&to=20190101`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
       const data = await res.json();
       const domains = new Set();
-      for (const [o] of data.slice(1)) {
-        try {
-          const h = new URL(o.startsWith('http') ? o : `https://${o}`).hostname.replace(/^www\./, '');
-          if (h.endsWith('.com')) domains.add(h);
-        } catch {}
+      for (const [k] of data.slice(1)) {
+        const d = surtToDomain(k);
+        if (d && d.endsWith('.com')) domains.add(d);
       }
-      const sample = [...domains].slice(0, 3).join(', ');
-      lines.push(`com,${prefix}: HTTP${res.status} | ${data.length - 1} записей | ${domains.size} доменов | ${sample || 'пусто'}`);
+      const sample = [...domains].slice(0, 4).join(', ');
+      lines.push(`com,${prefix}: ${data.length - 1} зап. | ${domains.size} дом. | ${sample || 'пусто'}`);
     } catch (e) {
-      lines.push(`com,${prefix}: ошибка — ${e.message}`);
+      lines.push(`com,${prefix}: ошибка - ${e.message.slice(0, 60)}`);
     }
     await new Promise(r => setTimeout(r, 500));
   }
