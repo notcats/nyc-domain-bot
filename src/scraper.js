@@ -1,7 +1,7 @@
+import { promises as dns } from 'dns';
 import { guessNiche } from './filter.js';
 
 const WORDLIST = [
-  // nyc + niche
   'nyclaw.com','nyclawyer.com','nyclegal.com','nycattorney.com',
   'nycrealty.com','nycrealestate.com','nycrealtor.com','nychomes.com','nycproperty.com',
   'nycplumber.com','nycplumbing.com','nycelectrician.com','nychvac.com',
@@ -16,20 +16,16 @@ const WORDLIST = [
   'nycrepair.com','nycfloor.com','nyctutor.com','nyccoach.com','nycschool.com',
   'nycpet.com','nycvet.com','nycpharmacy.com','nycprint.com','nycshipping.com',
   'nycbusiness.com','nycguide.com','nyclife.com','nycliving.com','nyclocal.com',
-  'nycpro.com','nycpros.com','nycexpert.com','nycservice.com','nycservices.com',
-  'nycbest.com','nycnews.com','nycmedia.com','nycblog.com',
-  // nyc + hyphen
+  'nycpro.com','nycpros.com','nycexpert.com','nycbest.com','nycnews.com','nycmedia.com',
   'nyc-law.com','nyc-legal.com','nyc-realty.com','nyc-dental.com',
   'nyc-medical.com','nyc-fitness.com','nyc-catering.com','nyc-contractor.com',
   'nyc-cleaning.com','nyc-movers.com','nyc-plumber.com','nyc-guide.com',
-  // newyork
   'newyorklaw.com','newyorklawyer.com','newyorklegal.com','newyorkattorney.com',
   'newyorkrealty.com','newyorkrealestate.com','newyorkdentist.com','newyorkmedical.com',
   'newyorkhotel.com','newyorkmovers.com','newyorkcleaning.com','newyorkgym.com',
   'newyorkconsulting.com','newyorkmarketing.com','newyorkaccounting.com',
   'newyorkinsurance.com','newyorkmortgage.com','newyorkcontractor.com',
   'newyorkrestaurant.com','newyorkbusiness.com','newyorkguide.com',
-  // manhattan
   'manhattanlaw.com','manhattanlawyer.com','manhattanlegal.com',
   'manhattanrealty.com','manhattanrealestate.com','manhattandentist.com',
   'manhattandental.com','manhattanmedical.com','manhattanhotel.com',
@@ -37,18 +33,15 @@ const WORDLIST = [
   'manhattanconsulting.com','manhattanmarketing.com','manhattanaccounting.com',
   'manhattancontractor.com','manhattanmortgage.com','manhattaninsurance.com',
   'manhattan-law.com','manhattan-realty.com','manhattan-dental.com',
-  // brooklyn
   'brooklynlaw.com','brooklynlawyer.com','brooklynlegal.com',
   'brooklynrealty.com','brooklynrealestate.com','brooklyndentist.com',
   'brooklyndiner.com','brooklyncafe.com','brooklynpizza.com','brooklynhotel.com',
   'brooklynmovers.com','brooklyncleaning.com','brooklyngym.com','brooklynfitness.com',
   'brooklyncatering.com','brooklynbakery.com','brooklyncontractor.com',
-  'brooklynbusiness.com','brooklynguide.com','brooklyn-law.com','brooklyn-realty.com',
-  // queens
+  'brooklynbusiness.com','brooklyn-law.com','brooklyn-realty.com',
   'queenslaw.com','queenslawyer.com','queensrealty.com','queensdentist.com',
   'queensmedical.com','queensmovers.com','queenscleaning.com','queensgym.com',
   'queenscatering.com','queenscontractor.com','queensbusiness.com',
-  // bronx
   'bronxlaw.com','bronxlawyer.com','bronxrealty.com','bronxdentist.com',
   'bronxmedical.com','bronxmovers.com','bronxcleaning.com','bronxgym.com',
   'bronxcontractor.com','bronxplumber.com','bronxbusiness.com',
@@ -57,6 +50,13 @@ const WORDLIST = [
 let scanIndex = 0;
 
 async function isDomainExpired(domain) {
+  // Step 1: DNS check — if domain resolves (A or NS), it's registered/held
+  try {
+    await dns.resolve(domain, 'NS');
+    return false; // Has nameservers → registered or premium aftermarket
+  } catch { /* ENOTFOUND = no NS → proceed */ }
+
+  // Step 2: RDAP check
   try {
     const res = await fetch(`https://rdap.org/domain/${domain}`, { signal: AbortSignal.timeout(8000) });
     if (res.status === 404) return true;
@@ -66,7 +66,7 @@ async function isDomainExpired(domain) {
       if (exp && new Date(exp.eventDate) < new Date()) return true;
     }
     return false;
-  } catch { return true; }
+  } catch { return false; } // conservative: RDAP error → assume registered
 }
 
 export async function scrapeExpiredDomains() {
@@ -78,8 +78,8 @@ export async function scrapeExpiredDomains() {
     try {
       if (await isDomainExpired(domain))
         results.push({ domain, bl: 0, aby: 0, acr: 0, source: 'wordlist', niche: guessNiche(domain) });
-    } catch (e) { console.error(`RDAP[${domain}]:`, e.message); }
-    await new Promise(r => setTimeout(r, 300));
+    } catch (e) { console.error(`Check[${domain}]:`, e.message); }
+    await new Promise(r => setTimeout(r, 200));
   }
   scanIndex = (scanIndex + BATCH) % WORDLIST.length;
   console.log(`scrapeExpiredDomains: ${results.length} expired found`);
@@ -92,11 +92,11 @@ export async function debugScrape() {
   for (const domain of samples) {
     try {
       const expired = await isDomainExpired(domain);
-      lines.push(`${domain}: ${expired ? 'истёк/свободен ✅' : 'зарегистрирован ❌'}`);
+      lines.push(`${domain}: ${expired ? 'свободен ✅' : 'занят ❌'}`);
     } catch (e) {
       lines.push(`${domain}: ошибка`);
     }
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 300));
   }
   return lines;
 }
