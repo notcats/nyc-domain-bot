@@ -1,5 +1,7 @@
-import { promises as dns } from 'dns';
 import { guessNiche } from './filter.js';
+
+const GD_KEY    = process.env.GODADDY_KEY;
+const GD_SECRET = process.env.GODADDY_SECRET;
 
 const WORDLIST = [
   'nyclaw.com','nyclawyer.com','nyclegal.com','nycattorney.com',
@@ -9,7 +11,7 @@ const WORDLIST = [
   'nycrestaurant.com','nycdiner.com','nyccafe.com','nycpizza.com','nycbar.com','nycwine.com',
   'nychotel.com','nycinn.com','nycmovers.com','nycmoving.com','nycstorage.com',
   'nyccleaning.com','nycconstruction.com','nyccontractor.com','nycroofing.com','nycpainting.com',
-  'nycooring.com','nyclocksmith.com','nycgym.com','nycfitness.com','nycyoga.com','nycspa.com',
+  'nycflooring.com','nyclocksmith.com','nycgym.com','nycfitness.com','nycyoga.com','nycspa.com',
   'nyccatering.com','nycbakery.com','nycflorist.com','nycjewelry.com','nycsalon.com',
   'nycconsulting.com','nycmarketing.com','nycaccounting.com','nyctax.com','nyccpa.com',
   'nycinsurance.com','nycmortgage.com','nycfinance.com','nycloans.com','nycbroker.com',
@@ -49,52 +51,82 @@ const WORDLIST = [
 
 let scanIndex = 0;
 
-async function isDomainExpired(domain) {
-  // Step 1: DNS check — if domain resolves (A or NS), it's registered/held
-  try {
-    await dns.resolve(domain, 'NS');
-    return false; // Has nameservers → registered or premium aftermarket
-  } catch { /* ENOTFOUND = no NS → proceed */ }
-
-  // Step 2: RDAP check
-  try {
-    const res = await fetch(`https://rdap.org/domain/${domain}`, { signal: AbortSignal.timeout(8000) });
-    if (res.status === 404) return true;
-    if (res.ok) {
-      const data = await res.json();
-      const exp = (data.events || []).find(e => e.eventAction === 'expiration');
-      if (exp && new Date(exp.eventDate) < new Date()) return true;
+async function checkAvailability(domain) {
+  if (!GD_KEY || !GD_SECRET) {
+    throw new Error('GODADDY_KEY / GODADDY_SECRET not set');
+  }
+  const res = await fetch(
+    `https://api.godaddy.com/v1/domains/available?domain=${domain}&checkType=FAST`,
+    {
+      headers: {
+        'Authorization': `sso-key ${GD_KEY}:${GD_SECRET}`,
+        'Accept': 'application/json',
+      },
+      signal: AbortSignal.timeout(10000),
     }
-    return false;
-  } catch { return false; } // conservative: RDAP error → assume registered
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 100)}`);
+  }
+  return res.json(); // { available, price, currency, definitive }
 }
 
 export async function scrapeExpiredDomains() {
+  if (!GD_KEY || !GD_SECRET) {
+    console.error('GoDaddy API keys not set — skipping scrape');
+    return [];
+  }
+
   const results = [];
   const BATCH = 40;
 
   for (let i = 0; i < BATCH; i++) {
     const domain = WORDLIST[(scanIndex + i) % WORDLIST.length];
     try {
-      if (await isDomainExpired(domain))
-        results.push({ domain, bl: 0, aby: 0, acr: 0, source: 'wordlist', niche: guessNiche(domain) });
-    } catch (e) { console.error(`Check[${domain}]:`, e.message); }
-    await new Promise(r => setTimeout(r, 200));
+      const data = await checkAvailability(domain);
+      if (data.available) {
+        // price is in micro-units (1/1,000,000 USD)
+        const priceUSD = Math.round((data.price || 0) / 1e6);
+        if (priceUSD <= 50) { // skip premium domains
+          results.push({
+            domain,
+            bl: 0, aby: 0, acr: 0,
+            price: priceUSD > 0 ? `$${priceUSD}` : undefined,
+            source: 'godaddy-api',
+            niche: guessNiche(domain),
+          });
+        } else {
+          console.log(`${domain}: skip premium $${priceUSD}`);
+        }
+      }
+    } catch (e) {
+      console.error(`GoDaddy[${domain}]: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, 250));
   }
+
   scanIndex = (scanIndex + BATCH) % WORDLIST.length;
-  console.log(`scrapeExpiredDomains: ${results.length} expired found`);
+  console.log(`scrapeExpiredDomains: ${results.length} available`);
   return results;
 }
 
 export async function debugScrape() {
-  const samples = WORDLIST.slice(0, 8);
+  if (!GD_KEY || !GD_SECRET) {
+    return ['GODADDY_KEY / GODADDY_SECRET не установлены — добавь в Railway Variables'];
+  }
+
   const lines = [];
-  for (const domain of samples) {
+  for (const domain of WORDLIST.slice(0, 8)) {
     try {
-      const expired = await isDomainExpired(domain);
-      lines.push(`${domain}: ${expired ? 'свободен ✅' : 'занят ❌'}`);
+      const data = await checkAvailability(domain);
+      const priceUSD = Math.round((data.price || 0) / 1e6);
+      const status = data.available
+        ? (priceUSD > 50 ? `премиум $${priceUSD}` : `свободен $${priceUSD} ✅`)
+        : 'занят ❌';
+      lines.push(`${domain}: ${status}`);
     } catch (e) {
-      lines.push(`${domain}: ошибка`);
+      lines.push(`${domain}: ошибка — ${e.message.slice(0, 60)}`);
     }
     await new Promise(r => setTimeout(r, 300));
   }
