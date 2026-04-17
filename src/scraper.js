@@ -2,6 +2,9 @@ import { guessNiche } from './filter.js';
 
 const GD_KEY    = process.env.GODADDY_KEY;
 const GD_SECRET = process.env.GODADDY_SECRET;
+const GD_BASE   = process.env.GODADDY_ENV === 'ote'
+  ? 'https://api.ote-godaddy.com'
+  : 'https://api.godaddy.com';
 
 const WORDLIST = [
   'nyclaw.com','nyclawyer.com','nyclegal.com','nycattorney.com',
@@ -56,7 +59,7 @@ async function checkAvailability(domain) {
     throw new Error('GODADDY_KEY / GODADDY_SECRET not set');
   }
   const res = await fetch(
-    `https://api.godaddy.com/v1/domains/available?domain=${domain}&checkType=FAST`,
+    `${GD_BASE}/v1/domains/available?domain=${domain}&checkType=FAST`,
     {
       headers: {
         'Authorization': `sso-key ${GD_KEY}:${GD_SECRET}`,
@@ -116,7 +119,9 @@ export async function debugScrape() {
     return ['GODADDY_KEY / GODADDY_SECRET не установлены — добавь в Railway Variables'];
   }
 
-  const lines = [];
+  const env = process.env.GODADDY_ENV || 'production';
+  const lines = [`Используется: ${GD_BASE} (env: ${env})`, ''];
+
   for (const domain of WORDLIST.slice(0, 8)) {
     try {
       const data = await checkAvailability(domain);
