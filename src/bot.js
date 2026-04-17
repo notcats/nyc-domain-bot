@@ -11,16 +11,18 @@ if (!process.env.BOT_TOKEN) {
   process.exit(1);
 }
 
-const bot    = new Bot(process.env.BOT_TOKEN);
+const bot     = new Bot(process.env.BOT_TOKEN);
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// ── Helpers ────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────
 function domainCard(domain, d, wb) {
+  const year = (d.aby > 0 ? d.aby : wb?.firstYear) || 'н/д';
+  const bl   = d.bl  > 0 ? d.bl  : '[проверить]';
   return [
     '🌐 *НОВЫЙ ДОМЕН НАЙДЕН*', '',
     `Домен: \`${domain}\``,
-    `📅 Год: ${d.aby || 'н/д'}`,
-    `🔗 Бэклинки: ${d.bl || 'н/д'}`,
+    `📅 Год: ${year}`,
+    `🔗 Бэклинки: ${bl}`,
     `📦 Архивов: ${d.acr || wb?.snapshots || 'н/д'}`,
     `🏷️ Ниша: ${d.niche || 'General NYC'}`,
     `💰 Цена: ${d.price || 'н/д'}`,
@@ -32,7 +34,7 @@ function domainCard(domain, d, wb) {
 
 function actionKeyboard(domain) {
   return new InlineKeyboard()
-    .text('✅ КУПИТЬ',    `buy:${domain}`)
+    .text('✅ КУПИТь',     `buy:${domain}`)
     .text('❌ ПРОПУСТИТЬ', `skip:${domain}`)
     .text('🔍 ПОДРОБНЕЕ',  `more:${domain}`);
 }
@@ -58,32 +60,35 @@ async function runScan() {
 
   const seen = new Set();
   const unique = all.filter(d => { if (seen.has(d.domain)) return false; seen.add(d.domain); return true; });
+  console.log(`Candidates: ${unique.length}`);
 
-  console.log(`Candidates after dedup: ${unique.length}`);
   let newCount = 0;
-
   for (const d of unique) {
     if (domainExists(d.domain)) continue;
     await new Promise(r => setTimeout(r, 2500));
 
     const wb = await checkWayback(d.domain);
-    if (!wb.clean) {
-      insertDomain({ ...d, status: 'rejected', wayback_clean: 0 });
+    const aby = d.aby || wb.firstYear || 0;
+    const acr = d.acr || wb.snapshots || 0;
+
+    if (!wb.clean || acr < 5 || (aby > 0 && aby > 2018)) {
+      insertDomain({ ...d, aby, acr, status: 'rejected', wayback_clean: 0 });
       continue;
     }
 
-    insertDomain({ ...d, status: 'pending', wayback_clean: 1 });
-    await sendDomain(d.domain, d, wb);
+    const enriched = { ...d, aby, acr };
+    insertDomain({ ...enriched, status: 'pending', wayback_clean: 1 });
+    await sendDomain(d.domain, enriched, wb);
     newCount++;
   }
-  console.log(`Scan complete. New domains sent: ${newCount}`);
+  console.log(`Scan complete. New: ${newCount}`);
   return newCount;
 }
 
 // ── Commands ───────────────────────────────────────────────────
 bot.command('start', ctx => {
   startScheduler(runScan, parseInt(process.env.CHECK_INTERVAL) || 30);
-  ctx.reply('✅ Мониторинг запущен! Проверка каждые 30 минут.\n\nКоманды:\n/stop — остановить\n/scan — запустить сканирование сейчас\n/status — статистика\n/found — одобренные домены\n/check <домен> — ручная проверка Wayback\n/debug — диагностика scrapers');
+  ctx.reply('✅ Мониторинг запущен! Проверка каждые 30 минут.\n\n/stop — остановить\n/scan — запустить скан сейчас\n/status — статистика\n/found — одобренные домены\n/check <домен> — Wayback проверка\n/debug — диагностика');
 });
 
 bot.command('stop', ctx => {
@@ -96,17 +101,17 @@ bot.command('scan', async ctx => {
   try {
     const found = await runScan();
     const s = getStats();
-    ctx.reply(`✅ Готово. Новых доменов отправлено: ${found}\nВсего в базе: ${s.total} | Одобрено: ${s.approved} | На рассмотрении: ${s.pending}`);
+    ctx.reply(`✅ Готово. Новых доменов: ${found}\nВсего: ${s.total} | Одобрено: ${s.approved} | На рассм.: ${s.pending}`);
   } catch (e) {
     ctx.reply(`❌ Ошибка: ${e.message}`);
   }
 });
 
 bot.command('debug', async ctx => {
-  await ctx.reply('🔬 Проверяю scrapers... (займёт ~30 сек)');
+  await ctx.reply('🔬 Проверяю CDX... (~15 сек)');
   try {
     const lines = await debugScrape();
-    ctx.reply('*Диагностика expireddomains.net:*\n' + lines.join('\n'), { parse_mode: 'Markdown' });
+    ctx.reply('*Wayback CDX:*\n' + lines.join('\n'), { parse_mode: 'Markdown' });
   } catch (e) {
     ctx.reply(`❌ Ошибка: ${e.message}`);
   }
@@ -140,6 +145,7 @@ bot.command('check', async ctx => {
     `*${domain}*`,
     `Wayback: ${wb.clean ? '✅ реальный сайт' : '❌ ' + wb.reason}`,
     `Снимков: ${wb.snapshots}`,
+    `Первый год: ${wb.firstYear || 'н/д'}`,
     wb.snapshotUrl ? `[Открыть](${wb.snapshotUrl})` : '',
   ].filter(Boolean).join('\n'), { parse_mode: 'Markdown' });
 });
@@ -167,7 +173,7 @@ bot.callbackQuery(/^more:(.+)$/, async ctx => {
   ctx.reply([
     `🔍 *${domain}*`, '',
     `[Wayback Machine](${waybackLink(domain)})`,
-    `[Ahrefs checker](https://ahrefs.com/website-authority-checker/?target=${domain})`,
+    `[Ahrefs](https://ahrefs.com/website-authority-checker/?target=${domain})`,
     `[expireddomains.net](https://www.expireddomains.net/domain-name-search/?q=${domain})`,
     `[GoDaddy Auctions](${godaddyLink(domain)})`,
   ].join('\n'), { parse_mode: 'Markdown' });
